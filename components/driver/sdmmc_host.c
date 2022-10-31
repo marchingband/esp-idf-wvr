@@ -67,6 +67,8 @@ static void configure_pin_iomux(uint8_t gpio_num);
 #endif // SOC_SDMMC_USE_GPIO_MATRIX
 
 static esp_err_t sdmmc_host_pullup_en_internal(int slot, int width);
+static bool sdmmc_any_slot_is_ddr(void);
+static void sdmmc_host_update_clk_phases(void);
 
 void sdmmc_host_reset(void)
 {
@@ -122,19 +124,37 @@ static void sdmmc_host_set_clk_div(int div)
 #if SOC_SDMMC_SUPPORT_XTAL_CLOCK
     SDMMC.clock.clk_sel = 1;
 #endif
-#if SOC_SDMMC_USE_GPIO_MATRIX
-    // 90 degree phase on input and output clocks
-    const int inout_clock_phase = 1;
-#else
-    // 180 degree phase on input and output clocks
-    const int inout_clock_phase = 4;
-#endif
-    // Set phases for in/out clocks
-    SDMMC.clock.phase_dout = inout_clock_phase;
-    SDMMC.clock.phase_din = inout_clock_phase;
+    sdmmc_host_update_clk_phases();
+}
+
+static void sdmmc_host_update_clk_phases(void)
+{
     SDMMC.clock.phase_core = 0;
-    // Wait for the clock to propagate
-    esp_rom_delay_us(10);
+    /* 90 deg. delay for cclk_out to satisfy large hold time for SDR12 (up to 25MHz) and SDR25 (up to 50MHz) modes.
+     * Whether this delayed clock will be used depends on use_hold_reg bit in CMD structure,
+     * determined when sending out the command.
+     */
+
+    if (!sdmmc_any_slot_is_ddr()) {
+        /* For SDR12 and SDR25, 180 deg. delay for cclk_in is recommended to satisfy card output delay.
+         * For reference, max. output delays depending on the mode are:
+         * SDR12: 14ns (0.35T), SDR25: 14ns (0.7T!), DDR50: 7ns (0.35T).
+         * This value is chosen as a compromise between SDR12 and SDR25 cases, since this function
+         * doesn't "know" about the current frequency. Ideally for SDR12 we would like to use 270deg input phase.
+         */
+        SDMMC.clock.phase_dout = 1;
+        SDMMC.clock.phase_din = 4;
+    } else {
+        /* For DDR50, 180 deg. delay for cclk_in may overlap with the opposite clock edge, so we have to use
+         * smaller 90deg delay instead. This should be sufficient given the maximum 7ns output delay.
+         * Long lines leading to the card may require increasing this.
+         */
+        SDMMC.clock.phase_dout = 1;
+        SDMMC.clock.phase_din = 1;
+    }
+
+    ESP_LOGD(TAG, "DDR=0x%x phase_out=%d phase_in=%d", SDMMC.uhs.ddr, SDMMC.clock.phase_dout, SDMMC.clock.phase_din);
+    esp_rom_delay_us(1);
 }
 
 static void sdmmc_host_input_clk_disable(void)
@@ -246,6 +266,9 @@ esp_err_t sdmmc_host_start_command(int slot, sdmmc_hw_cmd_t cmd, uint32_t arg) {
     if (cmd.data_expected && cmd.rw && (SDMMC.wrtprt.cards & BIT(slot)) != 0) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* Outputs should be synchronized to cclk_out */
+    cmd.use_hold_reg = 1;
+
     while (SDMMC.cmd.start_command == 1) {
         ;
     }
@@ -569,8 +592,14 @@ esp_err_t sdmmc_host_set_bus_ddr_mode(int slot, bool ddr_enabled)
         SDMMC.uhs.ddr &= ~mask;
         SDMMC.emmc_ddr_reg &= ~mask;
     }
+    sdmmc_host_update_clk_phases();
     ESP_LOGD(TAG, "slot=%d ddr=%d", slot, ddr_enabled ? 1 : 0);
     return ESP_OK;
+}
+
+static bool sdmmc_any_slot_is_ddr(void)
+{
+    return SDMMC.uhs.ddr != 0;
 }
 
 static void sdmmc_host_dma_init(void)
