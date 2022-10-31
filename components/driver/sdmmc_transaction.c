@@ -304,7 +304,6 @@ static sdmmc_hw_cmd_t make_hw_cmd(sdmmc_command_t* cmd)
     if (cmd->flags & SCF_RSP_CRC) {
         res.check_response_crc = 1;
     }
-    res.use_hold_reg = 1;
     if (cmd->data) {
         res.data_expected = 1;
         if ((cmd->flags & SCF_CMD_READ) == 0) {
@@ -338,6 +337,7 @@ static void process_command_response(uint32_t status, sdmmc_command_t* cmd)
         assert(cmd->flags & SCF_RSP_PRESENT);
         err = ESP_ERR_TIMEOUT;
     } else if ((cmd->flags & SCF_RSP_CRC) && (status & SDMMC_INTMASK_RCRC)) {
+        ESP_LOGW(TAG, "RCRC error");
         err = ESP_ERR_INVALID_CRC;
     } else if (status & SDMMC_INTMASK_RESP_ERR) {
         err = ESP_ERR_INVALID_RESPONSE;
@@ -357,6 +357,7 @@ static void process_data_status(uint32_t status, sdmmc_command_t* cmd)
         if (status & SDMMC_INTMASK_DTO) {
             cmd->error = ESP_ERR_TIMEOUT;
         } else if (status & SDMMC_INTMASK_DCRC) {
+            ESP_LOGW(TAG, "DCRC error");
             cmd->error = ESP_ERR_INVALID_CRC;
         } else if ((status & SDMMC_INTMASK_EBE) &&
                 (cmd->flags & SCF_CMD_READ) == 0) {
